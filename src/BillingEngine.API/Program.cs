@@ -5,51 +5,79 @@ using BillingEngine.Application.Commands.Auth.Register;
 using BillingEngine.Infrastructure.DependencyInjection;
 using FluentValidation;
 using MediatR;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+
 var builder = WebApplication.CreateBuilder(args);
 
+// ── Infraestrutura: persistência, segurança, JWT Bearer, mensageria ──────
 builder.Services.AddInfrastructure(builder.Configuration);
 
+// ── CQRS / MediatR ────────────────────────────────────────────────────────
 builder.Services.AddMediatR(cfg =>
     cfg.RegisterServicesFromAssembly(typeof(RegisterCommand).Assembly));
 
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
 builder.Services.AddValidatorsFromAssembly(typeof(RegisterCommand).Assembly);
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = builder.Configuration["Auth:Issuer"],
-            ValidateAudience = false,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true
-        };
-    });
-
+// ── Autorização ───────────────────────────────────────────────────────────
 builder.Services.AddAuthorization();
 
+// ── Swagger / OpenAPI ─────────────────────────────────────────────────────
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title       = "BillingEngine API",
+        Version     = "v1",
+        Description = "Motor de cobrança recorrente — documentação da API REST."
+    });
+
+    // Habilita o botão "Authorize" no Swagger UI para testar endpoints protegidos
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description  = "JWT Bearer. Formato: Bearer {token}",
+        Name         = "Authorization",
+        In           = ParameterLocation.Header,
+        Type         = SecuritySchemeType.Http,
+        Scheme       = "bearer",
+        BearerFormat = "JWT"
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id   = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 builder.Services.AddHealthChecks();
 
+// ── Pipeline ──────────────────────────────────────────────────────────────
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
-if (app.Environment.IsDevelopment())
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "BillingEngine API v1");
+    c.RoutePrefix = "swagger";
+});
 
 app.UseAuthentication();
 app.UseAuthorization();
 
+// ── Endpoints ─────────────────────────────────────────────────────────────
 app.MapAuthEndpoints();
 app.MapSubscriptionEndpoints();
 app.MapBillingEndpoints();
