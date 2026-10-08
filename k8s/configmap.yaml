@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-engine-config
+  namespace: billing-engine
+data:
+  RabbitMQ__Host: "rabbitmq-service"
+  RabbitMQ__Username: "billing"
+  Redis__ConnectionString: "redis-service:6379"
+  Auth__Issuer: "billing-engine"
+  Auth__AccessTokenExpiresMinutes: "15"
+  Auth__PartialTokenExpiresMinutes: "5"
+  Auth__RefreshTokenExpiresDays: "7"

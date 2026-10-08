@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-worker
+  namespace: billing-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-worker
+  template:
+    metadata:
+      labels:
+        app: billing-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: billing-worker
+          image: ghcr.io/billing-engine/worker:latest
+          envFrom:
+            - configMapRef:
+                name: billing-engine-config
+          env:
+            - name: ConnectionStrings__Postgres
+              valueFrom:
+                secretKeyRef:
+                  name: billing-engine-secrets
+                  key: DB_PASSWORD
+            - name: Encryption__Key
+              valueFrom:
+                secretKeyRef:
+                  name: billing-engine-secrets
+                  key: AES_KEY
+            - name: RabbitMQ__Password
+              valueFrom:
+                secretKeyRef:
+                  name: billing-engine-secrets
+                  key: RABBITMQ_PASS
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
