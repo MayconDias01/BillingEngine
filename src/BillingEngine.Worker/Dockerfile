@@ -12,7 +12,6 @@ RUN dotnet publish src/BillingEngine.Worker/BillingEngine.Worker.csproj -c Relea
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
-RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "BillingEngine.Worker.dll"]

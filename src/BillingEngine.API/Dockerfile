@@ -12,7 +12,6 @@ RUN dotnet publish src/BillingEngine.API/BillingEngine.API.csproj -c Release -o 
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
-RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 COPY --from=build /app/publish .
 EXPOSE 8080
