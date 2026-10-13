@@ -9,6 +9,7 @@ public interface IBillingRepository
     Task AddAsync(Billing billing, CancellationToken ct);
     Task UpdateAsync(Billing billing, CancellationToken ct);
     Task<IEnumerable<BillingAttempt>> GetAttemptsByBillingIdAsync(Guid billingId, CancellationToken ct);
+    Task<IEnumerable<BillingAttempt>> GetAttemptsBySubscriptionIdAsync(Guid subscriptionId, CancellationToken ct);
     Task AddAttemptAsync(BillingAttempt attempt, CancellationToken ct);
     Task UpdateAttemptAsync(BillingAttempt attempt, CancellationToken ct);
 }

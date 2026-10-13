@@ -6,6 +6,7 @@ public class CreateSubscriptionValidator : AbstractValidator<CreateSubscriptionC
 {
     public CreateSubscriptionValidator()
     {
+        RuleFor(x => x.UserId).NotEmpty();
         RuleFor(x => x.CustomerId).NotEmpty();
         RuleFor(x => x.PlanId).NotEmpty();
         RuleFor(x => x.Gateway).IsInEnum();

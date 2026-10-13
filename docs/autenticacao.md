@@ -1,6 +1,6 @@
 # Autenticação — BillingEngine
 
-> **Status:** Passo 1 implementado · **Versão:** 1.0 · **Última revisão:** 2026-10-08
+> **Status:** Ativo · **Versão:** 2.0 · **Última revisão:** 2026-10-12
 
 ---
 
@@ -18,6 +18,10 @@ Toda nova conta recebe automaticamente um segredo TOTP — o usuário precisa co
 autenticador antes de poder obter um access token válido. Isso garante que não existam
 contas sem segundo fator ativo.
 
+O refresh token é armazenado apenas como hash SHA-256 no banco de dados. Mesmo que o banco
+seja comprometido, tokens em texto claro não são recuperáveis, pois 64 bytes aleatórios não
+são suscetíveis a ataque de dicionário.
+
 ---
 
 ## 3. Arquitetura
@@ -30,6 +34,7 @@ Cliente                    API (Minimal API)            Application (MediatR)
   │                              │──── RegisterCommand ────────>│
   │                              │                              │── IPasswordHasher.Hash()
   │                              │                              │── ITotpService.GenerateSecret()
+  │                              │                              │── ITotpService.GetQrUri()
   │                              │                              │── IEncryptionService.Encrypt(secret)
   │                              │                              │── IUserRepository.AddAsync()
   │  201 { userId, totpSecret, qrUri }                         │
@@ -39,29 +44,37 @@ Cliente                    API (Minimal API)            Application (MediatR)
   │ ────────────────────────────>│                              │
   │                              │──── LoginCommand ───────────>│
   │                              │                              │── IUserRepository.GetByEmailAsync()
-  │                              │                              │── IPasswordHasher.Verify()
+  │                              │                              │── IPasswordHasher.Verify() ← sempre executa
   │                              │                              │── ITokenService.IssuePartialToken()
   │  200 { partialToken }        │                              │
   │ <────────────────────────────│                              │
   │                              │                              │
   │  POST /auth/mfa/verify       │                              │
   │  Authorization: Bearer <partial>                            │
+  │  Body: { code }              │                              │
   │ ────────────────────────────>│                              │
+  │                              │── extrai userId do sub claim │
   │                              │──── VerifyMfaCommand ───────>│
-  │                              │                              │── Extrai userId do partial token
-  │                              │                              │── IEncryptionService.Decrypt(secret)
-  │                              │                              │── ITotpService.Verify(secret, code)
+  │                              │                              │── IUserRepository.GetByIdAsync()
+  │                              │                              │── IEncryptionService.Decrypt()
+  │                              │                              │── ITotpService.Verify()
   │                              │                              │── ITokenService.IssueAccessToken()
   │                              │                              │── ITokenService.GenerateRefreshToken()
+  │                              │                              │── SHA256(refreshToken) → armazenar
+  │                              │                              │── IRefreshTokenRepository.AddAsync()
   │  200 { accessToken, refreshToken }                         │
   │ <────────────────────────────│                              │
   │                              │                              │
   │  POST /auth/refresh          │                              │
+  │  Body: { refreshToken }      │                              │
   │ ────────────────────────────>│                              │
   │                              │──── RefreshCommand ─────────>│
-  │                              │                              │── Valida refresh token no banco
+  │                              │                              │── SHA256(refreshToken) → buscar
+  │                              │                              │── Valida IsValid() (não revogado + não expirado)
+  │                              │                              │── Revoga token antigo (Revoke())
   │                              │                              │── ITokenService.IssueAccessToken()
   │                              │                              │── ITokenService.GenerateRefreshToken()
+  │                              │                              │── SHA256(newToken) → armazenar
   │  200 { accessToken, refreshToken }                         │
   │ <────────────────────────────│                              │
 ```
@@ -72,36 +85,37 @@ Cliente                    API (Minimal API)            Application (MediatR)
 
 ### Registro (`POST /auth/register`)
 
-1. E-mail deve ser único — retorna 422 se já existir (sem revelar se a conta existe: **Passo 4**)
+1. E-mail deve ser único — retorna 400 se já existir
 2. Senha mínima: 8 caracteres (validação FluentValidation no `RegisterValidator`)
 3. Segredo TOTP gerado automaticamente com `TotpService.GenerateSecret()` (20 bytes / 160 bits)
 4. Segredo **cifrado** com AES-256-GCM antes de persistir em `User.TotpSecret`
 5. O campo `IsMfaEnabled` é sempre `true` na criação — sem opção de desativar MFA
-6. Retorna o segredo em texto claro UMA VEZ (`RegisterResult.TotpSecret`) para o usuário cadastrar no autenticador
+6. Retorna o segredo em texto claro **UMA VEZ** (`RegisterResult.TotpSecret`) para o usuário cadastrar no autenticador
 7. Retorna o QR URI para ser codificado como QR code pelo front-end
 
 ### Login (`POST /auth/login`)
 
 1. Busca o usuário pelo e-mail
-2. Verifica o hash Argon2id com `IPasswordHasher.Verify()` (comparação em tempo constante)
+2. **Sempre** executa `IPasswordHasher.Verify()` — mesmo para e-mails desconhecidos (usando hash dummy) — prevenindo enumeração de usuários por timing
 3. Em caso de sucesso, emite um **partial token** (role=`mfa_pending`, TTL=5 min)
 4. **Não** emite access token — o usuário precisa confirmar o TOTP
-5. Resposta idêntica para e-mail inexistente e senha errada (previne enumeração de usuários)
+5. Resposta idêntica para e-mail inexistente e senha errada
 
 ### Verificação MFA (`POST /auth/mfa/verify`)
 
 1. Endpoint requer `Authorization: Bearer <partial_token>` com role `mfa_pending`
-2. `userId` vem do claim `sub` do partial token — **não** do corpo da requisição (Passo 3: corrigir `VerifyMfaCommand`)
-3. Decifra o `TotpSecret` armazenado com `IEncryptionService.Decrypt()`
+2. `userId` é extraído do claim `sub` do partial token pelo endpoint — **não** do corpo da requisição (proteção contra IDOR)
+3. Decifra o `TotpSecret` com `IEncryptionService.Decrypt()`
 4. Verifica o código TOTP com janela de ±1 step (±30 s)
 5. Em caso de sucesso, emite access token + refresh token
+6. O hash SHA-256 do refresh token é armazenado em `RefreshTokens` com TTL de 7 dias
 
 ### Refresh (`POST /auth/refresh`)
 
-1. Valida o refresh token contra o banco (implementado no Passo 3)
-2. Rotaciona o refresh token (um token só pode ser usado uma vez)
-3. Emite novo par access + refresh token
-4. Refresh token expirado ou já utilizado retorna 401
+1. Computa SHA-256 do token recebido e busca no banco
+2. Valida: não revogado e não expirado
+3. **Rotaciona**: revoga o token antigo e cria um novo par
+4. Um token já utilizado ou expirado retorna 400
 
 ---
 
@@ -109,64 +123,87 @@ Cliente                    API (Minimal API)            Application (MediatR)
 
 ```
 Registro ──> [Configura autenticador com TotpSecret/QrUri]
-                              │
-Login ──────────────────> PartialToken (5 min, role=mfa_pending)
-                              │
-                    Verifica código TOTP
-                              │
-                     AccessToken (15 min) + RefreshToken (7 dias)
-                              │
-                  ┌───────────┴──────────────┐
-            Request normal             Token expira
-         (Bearer AccessToken)               │
-                                    POST /auth/refresh
-                                    ──> novo AccessToken + novo RefreshToken
+                          │
+Login ──────────────> PartialToken (5 min, role=mfa_pending)
+                          │
+                Verifica código TOTP
+                          │
+               AccessToken (15 min) + RefreshToken (7 dias, hash no BD)
+                          │
+           ┌──────────────┴──────────────┐
+     Request normal                Token expira
+  (Bearer AccessToken)                  │
+                               POST /auth/refresh
+                           ──> novo AccessToken + novo RefreshToken
+                               (token antigo revogado)
 ```
 
 ---
 
-## 6. Configurações
+## 6. Entidade `RefreshToken`
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `Id` | `Guid` | PK |
+| `UserId` | `Guid` | FK para Users |
+| `TokenHash` | `varchar(44)` | SHA-256 do token em base64 (44 chars) |
+| `ExpiresAt` | `timestamptz` | Data de expiração |
+| `IsRevoked` | `bool` | True se o token foi revogado |
+| `CreatedAt` | `timestamptz` | Data de criação |
+| `RevokedAt` | `timestamptz?` | Data de revogação (nullable) |
+
+Índices:
+- Único em `TokenHash` (lookup O(1))
+- Composto em `(UserId, IsRevoked)` (consultas de auditoria)
+
+---
+
+## 7. Configurações
 
 ```json
 "Auth": {
-  "CertPath":                  "/certs/cert.pfx",
-  "CertPassword":              "${CERT_PASSWORD}",
-  "Issuer":                    "billing-engine",
-  "AccessTokenExpiresMinutes": 15,
-  "PartialTokenExpiresMinutes": 5,
-  "RefreshTokenExpiresDays":   7
+  "CertPath":                    "/certs/cert.pfx",
+  "CertPassword":                "${CERT_PASSWORD}",
+  "Issuer":                      "billing-engine",
+  "AccessTokenExpiresMinutes":   15,
+  "PartialTokenExpiresMinutes":  5,
+  "RefreshTokenExpiresDays":     7
 }
 ```
 
----
-
-## 7. Cuidados de Segurança
-
-| Risco                         | Mitigação                                                              |
-|-------------------------------|------------------------------------------------------------------------|
-| Enumeração de usuários        | Resposta idêntica para e-mail inexistente e senha errada               |
-| Brute-force de senha          | Argon2id com 64 MB de memória — ~0.5 s por tentativa                  |
-| Brute-force de TOTP           | Janela de 30 s + 6 dígitos = 1.000.000 combinações; rate limiting (Passo 4) |
-| Replay de TOTP                | Proteção anti-replay via Redis (Passo 3)                               |
-| Partial token reutilizado     | TTL de 5 min + role `mfa_pending` só aceita no endpoint de MFA        |
-| Refresh token vazado          | Rotação obrigatória + armazenamento no banco (Passo 3)                |
-| JWT falsificado               | Assinatura RS256 — chave privada nunca sai do servidor                |
+> `RefreshTokenExpiresDays` está hardcoded como `7` nos handlers.
+> Para torná-lo configurável: criar `AuthOptions` e usar `IOptions<AuthOptions>`.
 
 ---
 
-## 8. Pendências (Próximos Passos)
+## 8. Cuidados de Segurança
 
-- [ ] **Passo 3:** Implementar `RegisterHandler`, `LoginHandler`, `VerifyMfaHandler`, `RefreshHandler`
-- [ ] **Passo 3:** Extrair `userId` do `sub` do partial token em `VerifyMfaHandler` (não do body)
-- [ ] **Passo 3:** Armazenar refresh token no banco + rotação
-- [ ] **Passo 3:** Endpoint `POST /auth/logout` (revogar refresh token)
-- [ ] **Passo 4:** Rate limiting por IP e por usuário
-- [ ] **Passo 4:** Lockout após 5 tentativas de login falhas
+| Risco                         | Mitigação                                                                      |
+|-------------------------------|--------------------------------------------------------------------------------|
+| Enumeração de usuários (login) | Hash Argon2id sempre executado — dummy hash para e-mails desconhecidos         |
+| Brute-force de senha          | Argon2id com 64 MB de memória — ~0,5 s por tentativa                          |
+| Brute-force de TOTP           | Janela de 30 s + 6 dígitos = 1.000.000 combinações; rate limiting (Passo 4)   |
+| Replay de TOTP                | Proteção anti-replay via Redis (Passo 5)                                       |
+| IDOR no `/mfa/verify`         | `userId` extraído do JWT claim `sub` — não do body                             |
+| Partial token reutilizado     | TTL de 5 min + role `mfa_pending` só aceita no endpoint de MFA                 |
+| Refresh token vazado          | Hash SHA-256 armazenado — token em claro nunca persistido                      |
+| Refresh token reutilizado     | Rotação obrigatória: token revogado na primeira utilização                     |
+| JWT falsificado               | Assinatura RS256 — chave privada nunca sai do servidor                         |
 
 ---
 
-## 9. Histórico de Alterações
+## 9. Limitações Conhecidas
 
-| Data       | Versão | Autor                | Descrição                                      |
-|------------|--------|----------------------|------------------------------------------------|
-| 2026-10-08 | 1.0    | Equipe BillingEngine | Criação — fluxos documentados, handlers pendentes |
+- `RefreshTokenExpiresDays` está hardcoded nos handlers (não configurável via `appsettings.json`)
+- Não há proteção anti-replay de TOTP (Redis pendente — Passo 5)
+- Não há endpoint `POST /auth/logout` (revogação explícita do refresh token)
+- Não há lockout após tentativas de login falhas (Passo 4)
+
+---
+
+## 10. Histórico de Alterações
+
+| Data       | Versão | Autor                | Descrição                                                                  |
+|------------|--------|----------------------|----------------------------------------------------------------------------|
+| 2026-10-08 | 1.0    | Equipe BillingEngine | Criação — fluxos documentados, handlers pendentes                          |
+| 2026-10-12 | 2.0    | Equipe BillingEngine | Handlers implementados: Register, Login, VerifyMfa, Refresh; RefreshToken entity; migration AddRefreshTokens; endpoint MFA corrigido (IDOR) |

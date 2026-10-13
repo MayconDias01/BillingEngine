@@ -8,7 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.17" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.20" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.20" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.10.0">
+      <!-- NU1902: advisory GHSA-4625-4j76-fww9 (moderate) — no fixed version available in 1.x line;
+           accepted as known limitation, tracked in docs/observabilidade.md -->
+      <NoWarn>NU1902</NoWarn>
+    </PackageReference>
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.10.0" />
   </ItemGroup>
 
   <ItemGroup>

@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<Billing> Billings => Set<Billing>();
     public DbSet<BillingAttempt> BillingAttempts => Set<BillingAttempt>();
     public DbSet<PaymentMethod> PaymentMethods => Set<PaymentMethod>();
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
